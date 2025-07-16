@@ -12,7 +12,9 @@ from PyQt5.QtCore import Qt
 from database import fetch_all_passwords, add_service_to_db
 from security import encrypt_password, generate_key, decrypt_password
 
-config_file = './config.json'
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_file = os.path.join(script_dir, 'config.json')
 
 
 class PasswordManager(QMainWindow):

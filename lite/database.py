@@ -1,8 +1,8 @@
 import os
 import sqlite3
 from security import encrypt_password, decrypt_password
-
-db_file = './baza_hasel.db'
+script_dir = os.path.dirname(os.path.abspath(__file__))
+db_file = os.path.join(script_dir,'baza_hasel.db')
 
 def create_database_if_not_exists():
     if not os.path.exists(db_file):
@@ -89,3 +89,4 @@ def export_passwords_to_csv(file_path):
             _, serwis, login, zaszyfrowane = row
             odszyfrowane = decrypt_password(zaszyfrowane)
             writer.writerow([serwis, login, odszyfrowane])
+

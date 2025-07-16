@@ -1,30 +1,47 @@
-import json
-import csv
 import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLineEdit, QPushButton,
     QLabel, QMessageBox, QTreeWidget, QTreeWidgetItem, QMenu,
-    QDialog, QTextEdit, QPushButton, QApplication, QCheckBox,
-    QTableWidget, QTableWidgetItem, QHBoxLayout, QFileDialog, QHeaderView
+    QDialog, QTextEdit, QApplication, QCheckBox,
+    QTableWidget, QTableWidgetItem, QHBoxLayout, QFileDialog, QHeaderView,
+    QInputDialog
 )
 from PyQt5.QtCore import Qt
-
-from database import fetch_all_passwords, add_service_to_db
-from security import encrypt_password, generate_key, decrypt_password
-
-config_file = './config.json'
+from PyQt5.QtGui import QPixmap
+from mfa import get_qr_code_image, verify_code, get_or_create_secret
+from database import fetch_all_passwords, add_service_to_db, create_database_if_not_exists
+from security import encrypt_password, generate_keys, decrypt_password, save_pin, get_saved_pin 
+from paths import get_local_path
+from security_files import close_db_and_encrypt, encrypt_files, decrypt_files
+import time
+config_file = get_local_path("config.json")
 
 
 class PasswordManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("🔐 Menedżer Haseł")
-        self.setGeometry(100, 100, 1200, 700)
+        if create_database_if_not_exists():
+            self.setWindowTitle("🔐 Menedżer Haseł")
+            self.setGeometry(100, 100, 1200, 700)
+            self.pin_entered = False
+            self.setup_ui()
+        else:
+            decrypt_files()
+            self.setWindowTitle("🔐 Menedżer Haseł")
+            self.setGeometry(100, 100, 1200, 700)
+            self.pin_entered = False
+            self.setup_ui()
+            
 
-        self.pin_entered = False
-        self.setup_ui()
-        generate_key()  # Upewnij się, że klucz do szyfrowania istnieje
+    def closeEvent(self, event):
 
+        self.password_table.setRowCount(0)
+        self.loaded_passwords = []
+
+        QApplication.processEvents()
+
+        close_db_and_encrypt()
+        event.accept()
     def setup_ui(self):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -171,33 +188,56 @@ class PasswordManager(QMainWindow):
     def check_or_set_pin(self):
         entered_pin = self.pin_input.text()
 
-        if not os.path.exists(config_file):
-            self.save_pin(entered_pin)
-            QMessageBox.information(self, "Ustawiono PIN", "Nowy PIN został zapisany.")
-            self.unlock_ui()
-        else:
-            saved_pin = self.get_saved_pin()
-            if entered_pin == saved_pin:
-                self.unlock_ui()
-                QMessageBox.information(self, "Sukces", "PIN poprawny!")
+        # ✅ Zabezpieczenie: nie pozwalaj na ponowną konfigurację, jeśli istnieje zaszyfrowany plik
+        if not os.path.exists(config_file) and not os.path.exists(config_file + ".enc"):
+            # To naprawdę pierwsze uruchomienie → ustaw PIN + MFA
+            secret = get_or_create_secret()
+
+            if secret:
+                # 2FA istnieje → najpierw trzeba je potwierdzić
+                dialog = TwoFactorDialog(self)
+                if dialog.exec_() == QDialog.Accepted and dialog.result:
+                    save_pin(entered_pin)
+                    QMessageBox.information(self, "Akceptowano PIN", "Uzyskano dostęp do aplikacji.")
+                    self.unlock_ui()
+                else:
+                    QMessageBox.critical(self, "Błąd", "Niepoprawny kod 2FA. brak dostępu do aplikacji.")
             else:
-                QMessageBox.warning(self, "Błąd", "Niepoprawny PIN.")
+                # 2FA nie istnieje → normalna pierwsza konfiguracja
+                save_pin(entered_pin)
+                QMessageBox.information(self, "Ustawiono PIN", "Nowy PIN został zapisany.")
 
-    def save_pin(self, pin):
-        try:
-            with open(config_file, 'w') as file:
-                json.dump({'pin': pin}, file)
-        except Exception as e:
-            QMessageBox.critical(self, "Błąd", f"Nie udało się zapisać PIN-u: {str(e)}")
+                dialog = Setup2FADialog(self)
+                if dialog.exec_() == QDialog.Accepted and dialog.result:
+                    QMessageBox.information(self, "Gotowe", "2FA zostało skonfigurowane.")
+                    self.unlock_ui()
+                else:
+                    QMessageBox.critical(self, "Błąd", "Nie skonfigurowano 2FA.")
+        else:
+            # 🔐 Konfiguracja już istnieje – sprawdź PIN i kod 2FA
+            saved_pin = get_saved_pin()
+            if entered_pin == saved_pin:
+                secret = get_or_create_secret()
 
-    def get_saved_pin(self):
-        try:
-            with open(config_file, 'r') as file:
-                config = json.load(file)
-                return config.get('pin', '')
-        except Exception as e:
-            QMessageBox.critical(self, "Błąd", f"Nie udało się odczytać PIN-u: {str(e)}")
-            return ""
+                if secret is None:
+                    dialog = Setup2FADialog(self)
+                    if dialog.exec_() == QDialog.Accepted and dialog.result:
+                        QMessageBox.information(self, "Gotowe", "2FA zostało skonfigurowane.")
+                        self.unlock_ui()
+                    else:
+                        QMessageBox.critical(self, "Błąd", "Nie skonfigurowano 2FA.")
+                else:
+                    dialog = TwoFactorDialog(self)
+                    if dialog.exec_() == QDialog.Accepted and dialog.result:
+                        self.unlock_ui()
+                    else:
+                        QMessageBox.critical(self, "Błąd", "Niepoprawny kod 2FA.")
+            else:
+                QMessageBox.critical(self, "Błąd", "Niepoprawny PIN.")
+
+
+
+
 
     def unlock_ui(self):
         # Pokazujemy wszystko po poprawnym PINie
@@ -250,7 +290,7 @@ class PasswordManager(QMainWindow):
                 # Działania
                 copy_button.clicked.connect(lambda _, d=decrypted: self.copy_to_clipboard(d))
                 reveal_button.clicked.connect(lambda checked, r=row_index: self.toggle_password_in_table(r, checked))
-                edit_button.clicked.connect(lambda _, data=row: self.edit_password(data))
+                edit_button.clicked.connect(lambda _, data=(id_, service, login, decrypted): self.edit_password(data))
                 delete_button.clicked.connect(lambda _, data=row: self.delete_password(data))
 
                 for btn in (copy_button, reveal_button, edit_button, delete_button):
@@ -306,7 +346,10 @@ class PasswordManager(QMainWindow):
     def edit_password(self, password_data):
         self.service_input.setText(password_data[1])
         self.login_input.setText(password_data[2])
-        decrypted = decrypt_password(password_data[3])
+
+        encrypted = password_data[3]
+        decrypted = decrypt_password(encrypted)
+
         self.password_input.setText(decrypted)
 
         def save_edited():
@@ -325,6 +368,7 @@ class PasswordManager(QMainWindow):
         self.add_password_button.setText("Zapisz zmiany")
         self.add_password_button.clicked.disconnect()
         self.add_password_button.clicked.connect(save_edited)
+
         
     def toggle_password_in_table(self, row, show):
         item = self.password_table.item(row, 2)
@@ -332,8 +376,13 @@ class PasswordManager(QMainWindow):
             return
 
         if show:
-            password = item.data(Qt.UserRole)  # pobierz zapisane hasło
-            item.setText(password)
+            encrypted = item.data(Qt.UserRole)
+            try:
+                password = decrypt_password(encrypted)
+                item.setText(password)
+            except Exception as e:
+                item.setText("[Błąd odszyfrowania]")
+                print(f"[Błąd]: {e}")
         else:
             item.setText("••••••••")
 
@@ -364,3 +413,67 @@ class PasswordManager(QMainWindow):
                 self.load_passwords()
             except Exception as e:
                 QMessageBox.critical(self, "Błąd", f"Nie udało się zaimportować haseł:\n{str(e)}")
+
+
+class Setup2FADialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Konfiguracja 2FA")
+        self.result = False
+        self.setFixedSize(300, 400)
+
+        layout = QVBoxLayout(self)
+
+        # Pokaż QR kod
+        qr_path = get_qr_code_image()
+        if os.path.exists(qr_path):
+            qr_label = QLabel()
+            pixmap = QPixmap(qr_path).scaled(250, 250, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            qr_label.setPixmap(pixmap)
+            qr_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(qr_label)
+        else:
+            layout.addWidget(QLabel("Nie udało się wygenerować QR kodu."))
+
+        layout.addWidget(QLabel("Wprowadź kod z aplikacji:"))
+        self.code_input = QLineEdit()
+        self.code_input.setPlaceholderText("Kod 2FA")
+        layout.addWidget(self.code_input)
+
+        confirm_button = QPushButton("Potwierdź")
+        confirm_button.clicked.connect(self.verify_code)
+        layout.addWidget(confirm_button)
+
+    def verify_code(self):
+        code = self.code_input.text().strip()
+        if verify_code(code):
+            self.result = True
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Błąd", "Niepoprawny kod 2FA.")
+            
+class TwoFactorDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Weryfikacja 2FA")
+        self.result = False
+        self.setFixedSize(300, 150)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Wprowadź kod z aplikacji uwierzytelniającej:"))
+
+        self.code_input = QLineEdit()
+        self.code_input.setPlaceholderText("Kod 2FA")
+        layout.addWidget(self.code_input)
+
+        confirm_button = QPushButton("Potwierdź")
+        confirm_button.clicked.connect(self.verify_code)
+        layout.addWidget(confirm_button)
+
+    def verify_code(self):
+        code = self.code_input.text().strip()
+        if verify_code(code):
+            self.result = True
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Błąd", "Niepoprawny kod 2FA.")

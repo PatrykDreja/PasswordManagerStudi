@@ -1,9 +1,9 @@
 import os
 import ctypes
-
-key_file = './key.key'
-db_file = './baza_hasel.db'
-config_file = './config.json'
+script_dir = os.path.dirname(os.path.abspath(__file__))
+key_file = os.path.join(script_dir,'key.key')
+db_file = os.path.join(script_dir,'baza_hasel.db')
+config_file = os.path.join(script_dir, 'config.json')
 
 def hide_file(file_path):
     if os.path.exists(file_path):
